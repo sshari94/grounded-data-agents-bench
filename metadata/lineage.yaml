@@ -1,0 +1,20 @@
+# Grounding layer, lineage (condition 3 only).
+lineage:
+  - table: agg_scrp_dly
+    derived_from: scrp_evt
+    transformation: governed scrapped_packs definition (PACK level, eng_flg = 0, vd_flg = 0, distinct sn), grouped by plant-local date and line
+    status: current; this is the official daily scrap summary
+  - table: scrp_dly_snap
+    derived_from: scrp_evt
+    transformation: legacy definition (UTC date, counts all postings including module, engineering and voided scrap)
+    status: SUPERSEDED by agg_scrp_dly on 2026-04-01; do not use for reporting
+  - table: pk_bld
+    derived_from: assembly MES build events
+    status: current
+  - table: gnl_lnk
+    derived_from: MES assembly scans and rwk_evt
+    transformation: rwk_evt MOD_SWAP closes the old module link (vld_to) and opens a new one
+    status: current
+  - table: tst_rslt
+    derived_from: final-test station logs
+    status: current; one row per attempt

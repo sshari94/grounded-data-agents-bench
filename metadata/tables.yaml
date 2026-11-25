@@ -1,0 +1,120 @@
+# Grounding layer, table metadata (condition 2 and 3).
+# Follows Table I of the paper: grain, column semantics, keys and join paths,
+# governed measures, freshness, known traps, ownership. Lineage is in lineage.yaml.
+reference_date: "2026-06-15 (Monday). 'Today' means this date."
+time_convention: >
+  All *_ts_utc columns are stored in UTC. Plant-local time = ts_utc + dim_site.utc_ofst_h hours
+  (join through dim_ln.site_id). Day, week and month questions are always answered in plant-local
+  time. 'Last week' means the previous Monday 00:00 to Sunday 24:00 local, i.e. 2026-06-08 to 2026-06-14.
+
+tables:
+  dim_site:
+    grain: one row per manufacturing site
+    columns: {site_id: site key, site_cd: short site code (AUS, BER), utc_ofst_h: hours to add to UTC to get local time}
+    owner: data platform team
+    freshness: static
+  dim_ln:
+    grain: one row per production line
+    columns: {ln_id: line key used everywhere as 'line N', site_id: site of the line, ln_nm: display name}
+    joins: [dim_ln.site_id = dim_site.site_id]
+    owner: data platform team
+    freshness: static
+  dim_lot:
+    grain: one row per cell material lot
+    columns: {lot_id: lot key, supp_id: cell supplier id, matl_cd: cell chemistry code}
+    owner: supply quality team
+    freshness: daily
+  pk_bld:
+    grain: one row per pack built (pack serial number)
+    columns: {pack_sn: pack serial, ln_id: line that built it, bld_ts_utc: build completion time in UTC, prod_cd: product code}
+    joins: [pk_bld.ln_id = dim_ln.ln_id]
+    owner: assembly MES team
+    freshness: refreshed hourly; complete through 2026-06-14
+  cel_mst:
+    grain: one row per cell serial
+    columns: {cell_sn: cell serial, lot_id: material lot of the cell}
+    joins: [cel_mst.lot_id = dim_lot.lot_id, cel_mst.cell_sn = gnl_lnk.child_sn where child_lvl = 'CELL']
+    owner: cell traceability team
+    freshness: daily
+  gnl_lnk:
+    grain: one row per parent-child genealogy link with a validity period
+    columns:
+      child_sn: serial of the child part
+      child_lvl: CELL or MOD
+      parent_sn: serial of the parent (a module for CELL links, a pack for MOD links)
+      parent_lvl: MOD or PACK
+      vld_from: time the link became valid (UTC)
+      vld_to: time the link ended (UTC); NULL means the link is current
+    joins:
+      - "cell to module: gnl_lnk(child_lvl='CELL').parent_sn = gnl_lnk(child_lvl='MOD').child_sn"
+      - "module to pack: gnl_lnk(child_lvl='MOD').parent_sn = pk_bld.pack_sn"
+      - "cell to pack needs two hops: cell -> module -> pack"
+    known_traps:
+      - Rework replaces modules. A replaced module keeps its old link with vld_to set.
+        For 'currently' or 'today', both hops must use vld_to IS NULL.
+    owner: genealogy platform team
+    freshness: hourly
+  tst_rslt:
+    grain: one row per final-test ATTEMPT (a pack can have attempts 1, 2, 3)
+    columns:
+      tst_id: test attempt key
+      pack_sn: pack tested
+      stn_id: final test station
+      ln_id: line
+      tst_ts_utc: attempt time in UTC
+      atmpt_no: attempt number, 1 = first attempt
+      rslt_cd: P = pass, F = fail
+    joins: [tst_rslt.pack_sn = pk_bld.pack_sn, tst_rslt.ln_id = dim_ln.ln_id]
+    known_traps:
+      - Retests create extra rows. Never count rows as packs.
+      - A pack's outcome is its LATEST attempt (highest atmpt_no).
+    owner: test engineering
+    freshness: hourly
+  rwk_evt:
+    grain: one row per rework event on a pack
+    columns: {rwk_id: key, pack_sn: pack reworked, rwk_ts_utc: time (UTC), rwk_typ: MOD_SWAP, old_sn: module removed, new_sn: module installed}
+    owner: assembly MES team
+    freshness: hourly
+  scrp_evt:
+    grain: one row per scrap POSTING (not per part)
+    columns:
+      scrp_id: posting key
+      sn: serial scrapped (a pack or a module)
+      lvl: PACK or MOD
+      ln_id: line
+      scrp_ts_utc: posting time in UTC
+      rsn_cd: scrap reason code (ENG = engineering/test sample)
+      eng_flg: 1 = engineering scrap (excluded from reported scrap)
+      vd_flg: 1 = voided duplicate posting (ignore)
+      scrp_q: quantity, always 1
+    known_traps:
+      - Duplicate postings are voided with vd_flg = 1; ignore them.
+      - Module scrap from rework (lvl = MOD) is not pack scrap.
+    owner: quality systems team
+    freshness: hourly
+  agg_scrp_dly:
+    grain: one row per plant-local day and line
+    columns: {dt_lcl: plant-local date, ln_id: line, scrp_cnt: governed scrapped-pack count for that day}
+    owner: quality systems team
+    freshness: refreshed daily at 02:00 local; complete through 2026-06-14
+  scrp_dly_snap:
+    grain: one row per UTC date and line
+    columns: {dt: UTC date, ln_id: line, scrp_cnt: count of scrap postings}
+    owner: none (legacy)
+    freshness: last loaded 2026-03-31; no longer refreshed
+
+governed_measures:
+  first_pass_yield: >
+    Packs whose attempt 1 passed / packs with an attempt 1, using the local time of attempt 1.
+  final_yield: >
+    Packs whose latest attempt passed / packs tested, with the pack assigned to the local month or
+    week of its attempt 1.
+  failed_packs: >
+    Packs whose latest attempt is F, with the pack assigned to the local period of its attempt 1.
+  scrapped_packs: >
+    COUNT(DISTINCT sn) from scrp_evt where lvl = 'PACK' AND eng_flg = 0 AND vd_flg = 0, in local time.
+    The same number per day is stored in agg_scrp_dly.scrp_cnt.
+  most_common_scrap_reason: rsn_cd with the most scrapped_packs under the definition above.
+  not_governed: >
+    OEE, labor hours, cost, energy, shipments, takt time and cycle time are not available in this
+    database. If asked, do not estimate: ask the engineer or say the data is not available.
